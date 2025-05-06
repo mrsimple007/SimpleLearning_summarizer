@@ -63,6 +63,7 @@ python main.py
 - selenium
 - scrapy
 - webdriver-manager
+- psutil
 
 ## Usage
 
