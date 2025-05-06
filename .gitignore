@@ -31,13 +31,18 @@ ENV/
 *.swp
 *.swo
 
-# Environment variables
+# Project specific
 .env
-.env.local
-
-# Logs
 *.log
+temp/
+*.mp3
+*.mp4
+*.wav
+*.pdf
+*.docx
+*.doc
+*.txt
 
-# System files
+# OS specific
 .DS_Store
 Thumbs.db 

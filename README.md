@@ -1,74 +1,79 @@
-# DocSummarizer Telegram Bot
+# SimpleLearn - AI Learning Assistant
 
-A powerful Telegram bot that summarizes documents, processes audio/video content, and supports multiple languages.
+SimpleLearn is a Telegram bot that helps students and researchers by summarizing various types of content using AI. It can process text, documents, videos, and audio files to create concise summaries.
 
 ## Features
 
-- 📚 Document summarization (PDF, DOCX, TXT)
-- 🌐 Multi-language support (English, Russian, Uzbek)
-- 🎤 Audio transcription
-- 🎥 Video processing
-- ⚙️ User settings management
-- 🔄 Real-time processing
+- 📚 Summarize long lectures into concise points
+- 📝 Extract key points from textbooks
+- 📃 Break down complex articles
+- 🎥 Process video lectures
+- 🎤 Transcribe and summarize audio recordings
+- 🔗 Summarize web articles and research papers
+- 💬 Condense long texts
 
+## Supported Content Types
 
-## Setup
+- 📄 Documents (PDF, DOCX, DOC, TXT)
+- 🎥 Videos (MP4)
+- 🎤 Audio files (MP3, WAV)
+- 🔗 Web links
+- 💬 Text messages
 
-1. Install dependencies:
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/simplelearn.git
+cd simplelearn
+```
+
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Set up environment variables:
-```bash
-TELEGRAM_BOT_TOKEN=your_bot_token
-SUPABASE_URL=your_supabase_url
-SUPABASE_KEY=your_supabase_key
-GOOGLE_API_KEY=your_google_api_key
+3. Create a `.env` file with your API keys:
+```
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+ELEVENLABS_API_KEY=your_elevenlabs_api_key
 ```
 
-3. Run the bot:
+4. Run the bot:
 ```bash
-python src/core/main.py
+python main.py
 ```
 
-## Configuration
+## Requirements
 
-The bot uses several environment variables for configuration:
-- `TELEGRAM_BOT_TOKEN`: Your Telegram bot token
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_KEY`: Supabase API key
-- `GOOGLE_API_KEY`: Google API key for Gemini model
+- Python 3.8+
+- Telegram Bot Token
+- ElevenLabs API Key (for audio/video processing)
 
-## Features in Detail
+## Dependencies
 
-### Document Processing
-- Supports PDF, DOCX, and TXT files
-- Extracts text and generates summaries
-- Handles large documents with chunking
+- python-telegram-bot
+- moviepy
+- langchain-google-genai
+- docx2txt
+- PyPDF2
+- beautifulsoup4
+- aiohttp
+- python-dotenv
+- selenium
+- scrapy
+- webdriver-manager
 
-### Audio/Video Processing
-- Transcribes audio files to text
-- Processes video files to extract audio and text
-- Supports multiple audio/video formats
+## Usage
 
-### Language Support
-- English (🇬🇧)
-- Russian (🇷🇺)
-- Uzbek (🇺🇿)
-
-### User Management
-- Language preferences
-- User activity tracking
-- Settings management
+1. Start a chat with the bot on Telegram
+2. Select your preferred language
+3. Send any of the supported content types
+4. Receive an AI-generated summary
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 

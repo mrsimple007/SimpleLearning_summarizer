@@ -3,6 +3,9 @@ import logging
 from datetime import datetime
 import asyncio
 import re
+import tempfile
+import psutil
+from typing import Set, Dict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,6 +23,22 @@ from src.user_management import *
 from src.text_processing import *
 from src import ELEVENLABS_API_KEY  
 
+# Resource management
+BASE_FILE_SIZE = {
+    'video': 20 * 1024 * 1024,  # 20MB base
+    'audio': 10 * 1024 * 1024,  # 10MB base
+    'document': 15 * 1024 * 1024  # 15MB base
+}
+
+PREMIUM_MULTIPLIER = 2  # Premium users get 2x the base limit
+
+MAX_MEMORY_PER_FILE = 50 * 1024 * 1024  # 50MB
+MAX_TOTAL_MEMORY = 200 * 1024 * 1024  # 200MB
+
+# Track resources
+active_tasks: Set[asyncio.Task] = set()
+temp_files: Set[str] = set()
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -31,30 +50,80 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 LANGUAGE, CONTENT, PROCESSING, STYLE = range(4)
 
+# Resource management functions
+def check_memory_usage() -> float:
+    """Check current memory usage in MB"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    return memory_info.rss / 1024 / 1024  # Memory usage in MB
+
+async def cleanup_resources() -> None:
+    """Clean up all temporary resources"""
+    # Clean up temporary files
+    for temp_file in temp_files.copy():
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            temp_files.remove(temp_file)
+        except Exception as e:
+            logger.error(f"Error removing temp file {temp_file}: {e}")
+    
+    # Cancel and clean up background tasks
+    for task in active_tasks.copy():
+        try:
+            task.cancel()
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error cancelling task: {e}")
+        finally:
+            active_tasks.remove(task)
+
+def create_temp_file(suffix: str = None) -> str:
+    """Create a temporary file and track it"""
+    temp_path = tempfile.mktemp(suffix=suffix)
+    temp_files.add(temp_path)
+    return temp_path
+
+def get_file_size_limit(file_type: str, is_premium: bool) -> int:
+    base_limit = BASE_FILE_SIZE.get(file_type, 0)
+    if is_premium:
+        return base_limit * PREMIUM_MULTIPLIER
+    return base_limit
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     await update.message.reply_chat_action("typing")
     
     await update_user_activity(user)
     
-    language = await get_user_language(user.id)
-    
     # Check if user is admin
     if str(user.id) == "999932510":
         total_users = await get_total_users()
-        admin_message = f"👑 *Admin Dashboard*\n\n📊 Total Users: {total_users}\n\n"
+        total_processed_files = await get_total_processed_files()
+        total_processed_files += 20  # Add the initial count
+        todays_active_users = await get_todays_active_users()
+        
+        admin_message = (
+            "👑 *Admin Dashboard*\n\n"
+            f"📊 Total Users: {total_users}\n"
+            f"👥 Active Users Today: {todays_active_users}\n"
+            f"📝 Total Processed Files: {total_processed_files}\n\n"
+            "📈 *Statistics:*\n"
+            f"• Average files per user: {total_processed_files/total_users:.1f}\n"
+            f"• Success rate: {await get_success_rate():.1f}%"
+        )
         await update.message.reply_text(
             text=admin_message,
             parse_mode=ParseMode.MARKDOWN
         )
     
-    if language and language in LANGUAGES:
-        await update.message.reply_text(
-            text=get_translation(language, "welcome"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return CONTENT
-    else:
+    # Check if user exists and has a language set
+    language = await get_user_language(user.id)
+    
+    # If user doesn't exist or language is not set, show language selection
+    if not language:
         keyboard = [
             [InlineKeyboardButton(text, callback_data=f"lang_{code}")]
             for code, text in LANGUAGES.items()
@@ -66,6 +135,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=reply_markup
         )
         return LANGUAGE
+    
+    # If user exists and has a language set, show welcome message
+    await update.message.reply_text(
+        text=get_translation(language, "welcome"),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return CONTENT
 
 async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -83,8 +159,15 @@ async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode=ParseMode.MARKDOWN
     )
     
+    # Send welcome message and prompt for content
     await query.message.reply_text(
         text=get_translation(language_code, "welcome"),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Send document prompt
+    await query.message.reply_text(
+        text=get_translation(language_code, "send_document"),
         parse_mode=ParseMode.MARKDOWN
     )
     
@@ -181,6 +264,18 @@ async def settings_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         
+        # Send welcome message and prompt for content
+        await query.message.reply_text(
+            text=get_translation(language_code, "welcome"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Send document prompt
+        await query.message.reply_text(
+            text=get_translation(language_code, "send_document"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
         return CONTENT
     
     elif query.data.startswith("style_"):
@@ -233,6 +328,7 @@ async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user = update.effective_user
     language = await get_user_language(user.id)
+    is_premium = await get_user_premium_status(user.id)
     
     await update_user_activity(user)
     await update.message.reply_chat_action("typing")
@@ -247,357 +343,434 @@ async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         del context.user_data['processing_state']
     
     extracted_text = ""
+    status_message = None
+    typing_task = None
+    start_time = datetime.now()
     
-    # Handle video files
-    if update.message.video:
-        print("Handling video message")
-        logger.info("Video message detected")
-        
-        # Get user's premium status
-        is_premium = await get_user_premium_status(user.id)
-        
-        # Set different size limits for premium and regular users
-        MAX_VIDEO_SIZE = 20 * 1024 * 4096 if is_premium else 10 * 1024 * 4096  # 80MB for premium, 40MB for regular
-        video_size = update.message.video.file_size
-        logger.info(f"Video size: {video_size} bytes ({video_size / 1024 / 1024:.2f} MB)")
-        
-        if video_size > MAX_VIDEO_SIZE:
+    try:
+        # Check memory usage before processing
+        current_memory = check_memory_usage()
+        if current_memory > MAX_TOTAL_MEMORY:
             await update.message.reply_text(
-                f"⚠️ *Video Too Large*\n\nThe video file is {video_size / 1024 / 1024:.2f} MB, which exceeds the maximum allowed size of {MAX_VIDEO_SIZE / 1024 / 1024:.0f} MB. Please upload a smaller video.",
+                f"⚠️ *System Memory Limit Exceeded*\n\n"
+                f"Current memory usage: {current_memory:.1f}MB\n"
+                f"Maximum allowed: {MAX_TOTAL_MEMORY/1024/1024:.1f}MB\n\n"
+                "Please try again later or with a smaller file.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return CONTENT
         
-        if not ELEVENLABS_API_KEY:
-            await update.message.reply_text(
-                "⚠️ API Key Missing\nAudio/video transcription is not available. Please contact the bot administrator.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
+        # Handle video files
+        if update.message.video:
+            print("Handling video message")
+            logger.info("Video message detected")
             
-        status_message = await update.message.reply_text(
-            get_translation(language, "processing_video"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        try:
-            await update.message.reply_chat_action("typing")
+            video_size = update.message.video.file_size
+            max_video_size = get_file_size_limit('video', is_premium)
             
-            video = update.message.video
-            file = await context.bot.get_file(video.file_id)
-            file_bytes = await file.download_as_bytearray()
-            
-            from src.video_processing import process_video_file
-            print("Successfully imported video_processing module")
-
-            async def keep_typing():
-                while True:
-                    await update.message.reply_chat_action("typing")
-                    await asyncio.sleep(4)  
-
-            typing_task = asyncio.create_task(keep_typing())
-
-            success, message, transcript_text = await process_video_file(
-                file_bytes, 
-                ELEVENLABS_API_KEY,
-                output_format="mp3"
-            )
-            
-            typing_task.cancel()
-            
-            try:
-                await status_message.delete()
-            except Exception as e:
-                logger.error(f"Error deleting status message: {e}")
-            
-            if not success:
+            if video_size > max_video_size:
                 await update.message.reply_text(
-                    f"❌ *Video Processing Error*\n\n{message}",
+                    f"⚠️ *Video Too Large*\n\nThe video file is {video_size / 1024 / 1024:.2f} MB, which exceeds the maximum allowed size of {max_video_size / 1024 / 1024:.0f} MB. Please upload a smaller video.",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return CONTENT
             
-            if not transcript_text:
+            if not ELEVENLABS_API_KEY:
                 await update.message.reply_text(
-                    "❌ *No Text Extracted*\n\nCould not extract any text from the video. Please try a different video.",
+                    "⚠️ API Key Missing\nAudio/video transcription is not available. Please contact the bot administrator.",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return CONTENT
-                
-            extracted_text = transcript_text
-            
-            # Send the extracted text as a file
-            transcript_file = await save_transcription_to_temp_file(transcript_text)
-            try:
-                with open(transcript_file, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename="video_transcript.txt",
-                        caption="📝 *Transcript of Your video* \n",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-            except Exception as e:
-                logger.error(f"Error sending transcript file: {e}")
-            finally:
-                try:
-                    os.remove(transcript_file)
-                except:
-                    pass
-            
-        except Exception as e:
-            logger.error(f"Error processing video: {e}")
-            try:
-                await status_message.delete()
-            except Exception as e:
-                logger.error(f"Error deleting status message: {e}")
-            await update.message.reply_text(
-                f"❌ *Error Processing Video*\n\nAn error occurred: {str(e)}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-            
-    
-    # Handle audio files or voice messages
-    elif update.message.voice or update.message.audio:
-        print("Handling audio message")
-        logger.info("Audio message detected")
-        
-        # Get user's premium status
-        is_premium = await get_user_premium_status(user.id)
-        
-        # Set different size limits for premium and regular users
-        MAX_AUDIO_SIZE = 10 * 1024 * 4096 if is_premium else 5 * 1024 * 4096  # 40MB for premium, 20MB for regular
-        audio_obj = update.message.voice or update.message.audio
-        audio_size = audio_obj.file_size
-        logger.info(f"Audio size: {audio_size} bytes ({audio_size / 1024 / 1024:.2f} MB)")
-        
-        if audio_size > MAX_AUDIO_SIZE:
-            await update.message.reply_text(
-                f"⚠️ *Audio Too Large*\n\nThe audio file is {audio_size / 1024 / 1024:.2f} MB, which exceeds the maximum allowed size of {MAX_AUDIO_SIZE / 1024 / 1024:.0f} MB. Please upload a smaller audio file.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-        
-        # Use the global variable instead of fetching it again
-        if not ELEVENLABS_API_KEY:
-            await update.message.reply_text(
-                "⚠️ API Key Missing\nAudio/video transcription is not available. Please contact the bot administrator.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-                
-        status_message = await update.message.reply_text(
-            get_translation(language, "transcribing"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        try:
-            # Keep showing typing indicator while processing
-            await update.message.reply_chat_action("typing")
-            
-            file_obj = update.message.voice or update.message.audio
-            file = await context.bot.get_file(file_obj.file_id)
-            file_bytes = await file.download_as_bytearray()
-            
-            from src.audio_processing import extract_text_from_audio
-            
-            # Start a background task to keep showing typing indicator
-            async def keep_typing():
-                while True:
-                    await update.message.reply_chat_action("typing")
-                    await asyncio.sleep(4)  # Telegram typing indicator lasts for 5 seconds
-
-            typing_task = asyncio.create_task(keep_typing())
-
-            success, message, transcript_text = await extract_text_from_audio(
-                file_bytes, 
-                ELEVENLABS_API_KEY
-            )
-            
-            # Cancel the typing task
-            typing_task.cancel()
-            
-            try:
-                await status_message.delete()
-            except Exception as e:
-                logger.error(f"Error deleting status message: {e}")
-            
-            if not success:
-                await update.message.reply_text(
-                    f"❌ *Transcription Error*\n\n{message}",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return CONTENT
-            
-            if not transcript_text:
-                await update.message.reply_text(
-                    "❌ *No Text Extracted*\n\nCould not extract any text from the audio. Please try a different audio file.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return CONTENT
-                
-            extracted_text = transcript_text
-            
-            # Send the extracted text as a file
-            transcript_file = await save_transcription_to_temp_file(transcript_text)
-            try:
-                with open(transcript_file, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename="audio_transcript.txt",
-                        caption="📝 *Audio Transcript* \n",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-            except Exception as e:
-                logger.error(f"Error sending transcript file: {e}")
-            finally:
-                try:
-                    os.remove(transcript_file)
-                except:
-                    pass
-            
-        except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-            try:
-                await status_message.delete()
-            except Exception as e:
-                logger.error(f"Error deleting status message: {e}")
-            await update.message.reply_text(
-                f"❌ *Error Processing Audio*\n\nAn error occurred: {str(e)}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-    
-    # Handle document files
-    elif update.message.document:
-        document = update.message.document
-        
-        # Get user's premium status
-        is_premium = await get_user_premium_status(user.id)
-        
-        # Set different size limits for premium and regular users
-        MAX_DOCUMENT_SIZE = 30 * 1024 * 1024 if is_premium else 15 * 1024 * 1024  # 30MB for premium, 15MB for regular
-        
-        if document.file_size > MAX_DOCUMENT_SIZE:
-            await update.message.reply_text(
-                f"⚠️ *File Size Limit Exceeded* ⚠️\n\n📏 *The document is larger than {MAX_DOCUMENT_SIZE / 1024 / 1024:.0f}MB*\n\n💡 *Please try:*\n• Compressing the file\n• Splitting it into smaller parts\n• Using a smaller document",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-        
-        file_name = document.file_name if document.file_name else ""
-        file_ext = os.path.splitext(file_name)[1].lower() if file_name else ""
-        
-        if file_ext in ['.pdf', '.docx', '.doc', '.txt']:
-            status_message = await update.message.reply_text(
-                get_translation(language, "processing"),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            # Keep showing typing indicator while processing
-            await update.message.reply_chat_action("typing")
-            
-            file = await context.bot.get_file(document.file_id)
-            file_bytes = await file.download_as_bytearray()
-            
-            if file_ext == '.pdf':
-                extracted_text = await extract_text_from_pdf(file_bytes)
-            elif file_ext in ['.docx', '.doc']:
-                extracted_text = await extract_text_from_docx(file_bytes)
-            elif file_ext == '.txt':
-                extracted_text = await extract_text_from_txt(file_bytes)
-            
-            try:
-                await status_message.delete()
-            except Exception as e:
-                logger.error(f"Error deleting status message: {e}")
-        else:
-            await update.message.reply_text(
-                get_translation(language, "unsupported"),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-    
-    # Handle text or URLs
-    elif update.message.text:
-        text = update.message.text
-        
-        if text.startswith(('http://', 'https://')) or any(text.startswith(prefix) for prefix in ['www.', 'youtu.be/']):
-            if not text.startswith(('http://', 'https://')):
-                text = 'https://' + text.replace('www.', '', 1) if text.startswith('www.') else 'https://' + text
                 
             status_message = await update.message.reply_text(
-                get_translation(language, "processing"),
+                get_translation(language, "processing_video"),
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Keep showing typing indicator while processing
-            await update.message.reply_chat_action("typing")
-            
             try:
-                extracted_text = await extract_text_from_url(text)
-                if extracted_text.startswith("Error:") or "Failed to retrieve content from URL" in extracted_text:
-                    try:
-                        await status_message.delete()
-                    except Exception as e:
-                        logger.error(f"Error deleting status message: {e}")
+                video = update.message.video
+                file = await context.bot.get_file(video.file_id)
+                
+                # Create temporary file for video
+                video_path = create_temp_file(suffix='.mp4')
+                await file.download_to_drive(video_path)
+                
+                from src.video_processing import process_video_file
+                
+                # Start typing indicator task
+                async def keep_typing():
+                    while True:
+                        await update.message.reply_chat_action("typing")
+                        await asyncio.sleep(4)
+                
+                typing_task = asyncio.create_task(keep_typing())
+                active_tasks.add(typing_task)
+                
+                # Read video file in chunks
+                with open(video_path, 'rb') as f:
+                    video_bytes = f.read()
+                
+                success, message, transcript_text = await process_video_file(
+                    video_bytes, 
+                    ELEVENLABS_API_KEY,
+                    output_format="mp3"
+                )
+                
+                if not success:
                     await update.message.reply_text(
-                        f"⚠️ *URL Access Issue*\n\n{extracted_text}\n\nPlease check if:\n• The URL is correct\n• The website allows access\n• The site isn't behind a login",
+                        f"❌ *Video Processing Error*\n\n{message}",
                         parse_mode=ParseMode.MARKDOWN
                     )
                     return CONTENT
+                
+                if not transcript_text:
+                    await update.message.reply_text(
+                        "❌ *No Text Extracted*\n\nCould not extract any text from the video. Please try a different video.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return CONTENT
+                    
+                extracted_text = transcript_text
+                
+                # Track the processed file
+                processing_time = int((datetime.now() - start_time).total_seconds())
+                await track_processed_file(
+                    user_id=user.id,
+                    file_type='video',
+                    file_size=video_size,
+                    processing_time=processing_time,
+                    status='success'
+                )
+                
             except Exception as e:
-                logger.error(f"Error processing URL: {e}")
-                try:
-                    await status_message.delete()
-                except Exception as e:
-                    logger.error(f"Error deleting status message: {e}")
+                logger.error(f"Error processing video: {e}")
                 await update.message.reply_text(
-                    f"❌ *Error Processing URL*\n\nI encountered an issue: `{str(e)}`\nPlease try a different URL.",
+                    f"❌ *Error Processing Video*\n\nAn error occurred: {str(e)}",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return CONTENT
+        
+        # Handle audio files or voice messages
+        elif update.message.voice or update.message.audio:
+            print("Handling audio message")
+            logger.info("Audio message detected")
+            
+            audio_obj = update.message.voice or update.message.audio
+            audio_size = audio_obj.file_size
+            max_audio_size = get_file_size_limit('audio', is_premium)
+            
+            if audio_size > max_audio_size:
+                await update.message.reply_text(
+                    f"⚠️ *Audio Too Large*\n\nThe audio file is {audio_size / 1024 / 1024:.2f} MB, which exceeds the maximum allowed size of {max_audio_size / 1024 / 1024:.0f} MB. Please upload a smaller audio file.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+            
+            if not ELEVENLABS_API_KEY:
+                await update.message.reply_text(
+                    "⚠️ API Key Missing\nAudio/video transcription is not available. Please contact the bot administrator.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+                    
+            status_message = await update.message.reply_text(
+                get_translation(language, "transcribing"),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            try:
+                file_obj = update.message.voice or update.message.audio
+                file = await context.bot.get_file(file_obj.file_id)
+                
+                # Create temporary file for audio
+                audio_path = create_temp_file(suffix='.mp3')
+                await file.download_to_drive(audio_path)
+                
+                # Start typing indicator task
+                async def keep_typing():
+                    while True:
+                        await update.message.reply_chat_action("typing")
+                        await asyncio.sleep(4)
+                
+                typing_task = asyncio.create_task(keep_typing())
+                active_tasks.add(typing_task)
+                
+                # Read audio file in chunks
+                with open(audio_path, 'rb') as f:
+                    audio_bytes = f.read()
+                
+                success, message, transcript_text = await extract_text_from_audio(
+                    audio_bytes, 
+                    ELEVENLABS_API_KEY
+                )
+                
+                if not success:
+                    await update.message.reply_text(
+                        f"❌ *Transcription Error*\n\n{message}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return CONTENT
+                
+                if not transcript_text:
+                    await update.message.reply_text(
+                        "❌ *No Text Extracted*\n\nCould not extract any text from the audio. Please try a different audio file.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return CONTENT
+                    
+                extracted_text = transcript_text
+                
+                # Track the processed file
+                processing_time = int((datetime.now() - start_time).total_seconds())
+                await track_processed_file(
+                    user_id=user.id,
+                    file_type='audio',
+                    file_size=audio_size,
+                    processing_time=processing_time,
+                    status='success'
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing audio: {e}")
+                await update.message.reply_text(
+                    f"❌ *Error Processing Audio*\n\nAn error occurred: {str(e)}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+        
+        # Handle document files
+        elif update.message.document:
+            document = update.message.document
+            max_doc_size = get_file_size_limit('document', is_premium)
+            file_name = document.file_name if document.file_name else "unnamed"
+            file_ext = os.path.splitext(file_name)[1].lower() if file_name else ""
+            
+            # Log document details for debugging
+            logger.info(f"Processing document: {file_name} ({file_ext}) - Size: {document.file_size} bytes")
+            
+            if document.file_size > max_doc_size:
+                size_mb = document.file_size / 1024 / 1024
+                max_size_mb = max_doc_size / 1024 / 1024
+                await update.message.reply_text(
+                    f"❌ *File Size Limit Exceeded*\n\n"
+                    f"📄 File: `{file_name}`\n"
+                    f"📊 Size: {size_mb:.1f}MB\n"
+                    f"⚖️ Max allowed: {max_size_mb:.1f}MB\n\n"
+                    "💡 *Please try:*\n"
+                    "• Compressing the file\n"
+                    "• Splitting it into smaller parts\n"
+                    "• Using a smaller document\n\n"
+                    f"💎 *Premium users get {PREMIUM_MULTIPLIER}x larger file limits!*",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+            
+            if file_ext not in ['.pdf', '.docx', '.doc', '.txt']:
+                await update.message.reply_text(
+                    f"❌ *Unsupported File Format*\n\n"
+                    f"📄 File: `{file_name}`\n"
+                    f"📎 Format: `{file_ext}`\n\n"
+                    "✅ *Supported formats:*\n"
+                    "• PDF (`.pdf`)\n"
+                    "• Word (`.docx`, `.doc`)\n"
+                    "• Text (`.txt`)\n\n"
+                    "Please convert your file to one of these formats and try again.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+            
+            status_message = await update.message.reply_text(
+                f"🔄 *Processing Document*\n\n"
+                f"📄 File: `{file_name}`\n"
+                "Please wait...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            try:
+                file = await context.bot.get_file(document.file_id)
+                doc_path = create_temp_file(suffix=file_ext)
+                await file.download_to_drive(doc_path)
+                
+                # Start typing indicator
+                async def keep_typing():
+                    while True:
+                        await update.message.reply_chat_action("typing")
+                        await asyncio.sleep(4)
+                
+                typing_task = asyncio.create_task(keep_typing())
+                active_tasks.add(typing_task)
+                
+                with open(doc_path, 'rb') as f:
+                    file_bytes = f.read()
+                
+                if file_ext == '.pdf':
+                    extracted_text = await extract_text_from_pdf(file_bytes)
+                elif file_ext in ['.docx', '.doc']:
+                    extracted_text = await extract_text_from_docx(file_bytes)
+                elif file_ext == '.txt':
+                    extracted_text = await extract_text_from_txt(file_bytes)
+                
+                if not extracted_text or len(extracted_text.strip()) == 0:
+                    await update.message.reply_text(
+                        f"❌ *No Text Found*\n\n"
+                        f"📄 File: `{file_name}`\n\n"
+                        "The document appears to be empty or contains no extractable text.\n\n"
+                        "💡 *Please check:*\n"
+                        "• The file is not password protected\n"
+                        "• The file contains actual text (not just images)\n"
+                        "• The file is not corrupted",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return CONTENT
+                
+                # Track successful processing
+                processing_time = int((datetime.now() - start_time).total_seconds())
+                await track_processed_file(
+                    user_id=user.id,
+                    file_type='document',
+                    file_size=document.file_size,
+                    processing_time=processing_time,
+                    status='success'
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing document {file_name}: {str(e)}")
+                error_message = str(e)
+                
+                # Track failed processing
+                processing_time = int((datetime.now() - start_time).total_seconds())
+                await track_processed_file(
+                    user_id=user.id,
+                    file_type='document',
+                    file_size=document.file_size,
+                    processing_time=processing_time,
+                    status='error',
+                    error_message=error_message
+                )
+                
+                await update.message.reply_text(
+                    f"❌ *Error Processing Document*\n\n"
+                    f"📄 File: `{file_name}`\n"
+                    f"❗ Error: {error_message}\n\n"
+                    "💡 *Please try:*\n"
+                    "• Using a different document\n"
+                    "• Checking if the file is corrupted\n"
+                    "• Converting to a different format\n"
+                    "• Making sure the file isn't password protected",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+        
+        # Handle text messages
+        elif update.message.text:
+            text = update.message.text.strip()
+            if len(text) < 50:
+                await update.message.reply_text(
+                    get_translation(language, "text_too_short"),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+            
+            # Track the text processing
+            processing_time = int((datetime.now() - start_time).total_seconds())
+            await track_processed_file(
+                user_id=user.id,
+                file_type='text',
+                file_size=len(text.encode('utf-8')),  
+                processing_time=processing_time,
+                status='success'
+            )
+            
+            extracted_text = text
+            context.user_data['extracted_text'] = extracted_text
+            
+            keyboard = [
+                [InlineKeyboardButton("✅ Summarize", callback_data="process_summarize")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            preview = extracted_text[:150] + "..." if len(extracted_text) > 150 else extracted_text
+            
+            await update.message.reply_text(
+                f"✅ *{get_translation(language, 'text_successfully_processed')}*\n\n"
+                f"*Preview:*\n```\n{preview}\n```\n\n"
+                f"{get_translation(language, 'would_you_like_summary')}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+            
+            return PROCESSING
+        
+        # Process the extracted text
+        if extracted_text:
+            extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
+            
+            if len(extracted_text) < 50:
+                await update.message.reply_text(
+                    "⚠️ *Content too short*\n\nThe extracted content is too short to create a meaningful summary. Please provide more content.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+                
+            context.user_data['extracted_text'] = await truncate_text(extracted_text)
+            
+            keyboard = [
+                [InlineKeyboardButton("✅ Summarize", callback_data="process_summarize")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            preview = extracted_text[:150] + "..." if len(extracted_text) > 150 else extracted_text
+            
+            await update.message.reply_text(
+                f"✅ *Content Successfully Extracted*\n\n"
+                f"*Preview:*\n```\n{preview}\n```\n\n"
+                "Would you like me to create a summary of this content?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+            
+            return PROCESSING
+        
+        await update.message.reply_text(
+            get_translation(language, "error"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return CONTENT
+        
+    except Exception as e:
+        logger.error(f"Error processing content: {e}")
+        # Track the failed file processing
+        processing_time = int((datetime.now() - start_time).total_seconds())
+        await track_processed_file(
+            user_id=user.id,
+            file_type='unknown',
+            file_size=0,
+            processing_time=processing_time,
+            status='error',
+            error_message=str(e)
+        )
+        raise
+        
+    finally:
+        # Clean up resources
+        if status_message:
             try:
                 await status_message.delete()
             except Exception as e:
                 logger.error(f"Error deleting status message: {e}")
-        else:
-            extracted_text = text
-    
-    # Process the extracted text
-    if extracted_text:
-        extracted_text = re.sub(r'\s+', ' ', extracted_text).strip()
         
-        if len(extracted_text) < 50:
-            await update.message.reply_text(
-                "⚠️ *Content too short*\n\nThe extracted content is too short to create a meaningful summary. Please provide more content.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return CONTENT
-            
-        context.user_data['extracted_text'] = await truncate_text(extracted_text)
+        if typing_task:
+            try:
+                typing_task.cancel()
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Error cancelling typing task: {e}")
+            finally:
+                active_tasks.discard(typing_task)
         
-        keyboard = [
-            [InlineKeyboardButton("✅ Summarize", callback_data="process_summarize")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        preview = extracted_text[:150] + "..." if len(extracted_text) > 150 else extracted_text
-        
-        await update.message.reply_text(
-            f"✅ *Content Successfully Extracted*\n\n*Preview:*\n```\n{preview}\n```\n\nWould you like me to create a summary of this content?",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup
-        )
-        
-        return PROCESSING
-    
-    await update.message.reply_text(
-        get_translation(language, "error"),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return CONTENT
-
+        await cleanup_resources()
 
 async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -605,9 +778,19 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     user = query.from_user
     language = await get_user_language(user.id)
+    status_message = None
+    typing_task = None
     
-    if query.data == "process_summarize":
-        try:
+    try:
+        if query.data == "process_summarize":
+            # Check memory usage before processing
+            if check_memory_usage() > MAX_TOTAL_MEMORY:
+                await query.message.reply_text(
+                    "⚠️ *Memory Limit Exceeded*\n\nPlease try again later or with a smaller file.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return CONTENT
+            
             status_message = await query.message.reply_text(
                 get_translation(language, "summarizing"),
                 parse_mode=ParseMode.MARKDOWN
@@ -617,27 +800,26 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             if extracted_text:
                 try:
-                    # Start a background task to keep showing typing indicator
+                    # Start typing indicator task
                     async def keep_typing():
                         while True:
                             await query.message.reply_chat_action("typing")
-                            await asyncio.sleep(4)  # Telegram typing indicator lasts for 5 seconds
-
+                            await asyncio.sleep(4)
+                    
                     typing_task = asyncio.create_task(keep_typing())
+                    active_tasks.add(typing_task)
                     
                     summary = await generate_summary(extracted_text, language)
-                    
-                    # Cancel the typing task
-                    typing_task.cancel()
-                    
-                    try:
-                        await status_message.delete()
-                    except Exception as e:
-                        logger.error(f"Error deleting status message: {e}")
                     
                     # Send the formatted summary
                     await query.message.reply_text(
                         summary,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Send a simple message indicating the summary is ready
+                    await query.message.reply_text(
+                        get_translation(language, "summary_ready"),
                         parse_mode=ParseMode.MARKDOWN
                     )
                     
@@ -646,39 +828,39 @@ async def process_content(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     if 'processing_state' in context.user_data:
                         del context.user_data['processing_state']
                     
-                    # Ask if the user wants to summarize more content
-                    await query.message.reply_text(
-                        get_translation(language, "send_document"),
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    
                 except Exception as e:
                     logger.error(f"Error generating summary: {e}")
-                    try:
-                        await status_message.delete()
-                    except Exception as e:
-                        logger.error(f"Error deleting status message: {e}")
                     await query.message.reply_text(
                         get_translation(language, "error"),
                         parse_mode=ParseMode.MARKDOWN
                     )
             else:
-                try:
-                    await status_message.delete()
-                except Exception as e:
-                    logger.error(f"Error deleting status message: {e}")
                 await query.message.reply_text(
                     get_translation(language, "error"), 
                     parse_mode=ParseMode.MARKDOWN
                 )
-        except Exception as e:
-            logger.error(f"Error in process_content: {e}")
-            await query.message.reply_text(
-                get_translation(language, "error"),
-                parse_mode=ParseMode.MARKDOWN
-            )
-    
-    return CONTENT
+        return CONTENT
+        
+    finally:
+        # Clean up resources
+        if status_message:
+            try:
+                await status_message.delete()
+            except Exception as e:
+                logger.error(f"Error deleting status message: {e}")
+        
+        if typing_task:
+            try:
+                typing_task.cancel()
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Error cancelling typing task: {e}")
+            finally:
+                active_tasks.discard(typing_task)
+        
+        await cleanup_resources()
 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
@@ -696,6 +878,7 @@ def main() -> None:
                 CommandHandler("settings", settings_command),
                 CommandHandler("help", help_command),
                 CallbackQueryHandler(language_selection, pattern=r"^lang_"),
+                MessageHandler(filters.Document.ALL | filters.TEXT | filters.VIDEO | filters.AUDIO | filters.VOICE & ~filters.COMMAND, handle_content),
             ],
             CONTENT: [
                 CommandHandler("start", start),
