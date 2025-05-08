@@ -7,12 +7,13 @@ import tempfile
 import psutil
 from typing import Set, Dict
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ConversationHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, TimedOut, NetworkError
 
 from src.prompts_summarize import LANGUAGES, TRANSLATIONS
 from src.llm_service import generate_summary
@@ -21,7 +22,8 @@ from src.document_processing import *
 from src.web_processing import *
 from src.user_management import *
 from src.text_processing import *
-from src import ELEVENLABS_API_KEY  
+from src import ELEVENLABS_API_KEY
+from payment_integration import setup_payment_handlers, upgrade_command
 
 # Resource management
 BASE_FILE_SIZE = {
@@ -46,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 logger.info(f"ELEVENLABS_API_KEY present: {bool(ELEVENLABS_API_KEY)}")
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_SIMPLELEARNING", "")
 
 LANGUAGE, CONTENT, PROCESSING, STYLE = range(4)
 
@@ -870,6 +872,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(settings_button, pattern=r"^settings_"))
     application.add_handler(CallbackQueryHandler(settings_button, pattern=r"^style_"))
     
+    # Set up payment handlers
+    setup_payment_handlers(application)
+    
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -877,6 +882,7 @@ def main() -> None:
                 CommandHandler("start", start),
                 CommandHandler("settings", settings_command),
                 CommandHandler("help", help_command),
+                CommandHandler("upgrade", upgrade_command),
                 CallbackQueryHandler(language_selection, pattern=r"^lang_"),
                 MessageHandler(filters.Document.ALL | filters.TEXT | filters.VIDEO | filters.AUDIO | filters.VOICE & ~filters.COMMAND, handle_content),
             ],
@@ -884,6 +890,7 @@ def main() -> None:
                 CommandHandler("start", start),
                 CommandHandler("settings", settings_command),
                 CommandHandler("help", help_command),
+                CommandHandler("upgrade", upgrade_command),
                 MessageHandler(filters.Document.ALL | filters.TEXT | filters.VIDEO | filters.AUDIO | filters.VOICE & ~filters.COMMAND, handle_content),
             ],
             PROCESSING: [
@@ -891,12 +898,14 @@ def main() -> None:
                 CommandHandler("start", start),
                 CommandHandler("settings", settings_command),
                 CommandHandler("help", help_command),
+                CommandHandler("upgrade", upgrade_command),
             ],
             STYLE: [
                 CallbackQueryHandler(settings_button, pattern=r"^style_"),
                 CommandHandler("start", start),
                 CommandHandler("settings", settings_command),
                 CommandHandler("help", help_command),
+                CommandHandler("upgrade", upgrade_command),
             ],
         },
         fallbacks=[CommandHandler("start", start)],

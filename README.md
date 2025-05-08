@@ -24,8 +24,8 @@ SimpleLearn is a Telegram bot that helps students and researchers by summarizing
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/simplelearn.git
-cd simplelearn
+git clone https://github.com/MrSimple07/simplelearn_summarizer.git
+cd simplelearn_summarizer
 ```
 
 2. Install dependencies:
