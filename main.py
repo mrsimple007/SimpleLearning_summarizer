@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 logger.info(f"ELEVENLABS_API_KEY present: {bool(ELEVENLABS_API_KEY)}")
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_SIMPLELEARNINGUZ", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_SIMPLELEARNING", "")
 
 LANGUAGE, CONTENT, PROCESSING, STYLE = range(4)
 
