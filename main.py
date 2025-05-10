@@ -59,6 +59,7 @@ def check_memory_usage() -> float:
     memory_info = process.memory_info()
     return memory_info.rss / 1024 / 1024  # Memory usage in MB
 
+
 async def cleanup_resources() -> None:
     """Clean up all temporary resources"""
     # Clean up temporary files
@@ -94,19 +95,68 @@ def get_file_size_limit(file_type: str, is_premium: bool) -> int:
         return base_limit * PREMIUM_MULTIPLIER
     return base_limit
 
+
+
+async def check_user_exists(user_id: int) -> bool:
+    try:
+        response = supabase.table('simplelearn_users') \
+            .select('user_id') \
+            .eq('user_id', str(user_id)) \
+            .execute()
+        return len(response.data) > 0
+    except Exception as e:
+        logger.error(f"Error checking simplelearn user existence: {e}")
+        return False
+
+async def create_new_user (
+    user_id: int, 
+    username: str = None, 
+    first_name: str = None, 
+    last_name: str = None, 
+    language: str = "en"
+) -> bool:
+    try:
+        current_time = get_tashkent_time()
+        response = supabase.table('simplelearn_users').insert({
+            'user_id': str(user_id),
+            'username': username,
+            'first_name': first_name,
+            'last_name': last_name,
+            'language': language,
+            'created_at': current_time,
+            'last_interaction': current_time,
+            'is_premium': False
+        }).execute()
+        logger.info(f"Created new simplelearn user with ID {user_id}")
+        return bool(response.data)
+    except Exception as e:
+        logger.error(f"Error creating new simplelearn user: {e}")
+        return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     await update.message.reply_chat_action("typing")
-    
+
+    # Check if user exists in simplelearn_users, create if not
+    user_exists = await check_user_exists(user.id)
+    if not user_exists:
+        await create_new_user(
+            user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language="en"
+        )
+
     await update_user_activity(user)
-    
-    # Check if user is admin
+
+    # Admin dashboard
     if str(user.id) == "999932510":
         total_users = await get_total_users()
         total_processed_files = await get_total_processed_files()
         total_processed_files += 20  # Add the initial count
         todays_active_users = await get_todays_active_users()
-        
+
         admin_message = (
             "👑 *Admin Dashboard*\n\n"
             f"📊 Total Users: {total_users}\n"
@@ -120,11 +170,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             text=admin_message,
             parse_mode=ParseMode.MARKDOWN
         )
-    
-    # Check if user exists and has a language set
+
+    # Get user language
     language = await get_user_language(user.id)
-    
-    # If user doesn't exist or language is not set, show language selection
+
+    # If language is not set, show language selection
     if not language:
         keyboard = [
             [InlineKeyboardButton(text, callback_data=f"lang_{code}")]
@@ -137,7 +187,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=reply_markup
         )
         return LANGUAGE
-    
+
     # If user exists and has a language set, show welcome message
     await update.message.reply_text(
         text=get_translation(language, "welcome"),
