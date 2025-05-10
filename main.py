@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 logger.info(f"ELEVENLABS_API_KEY present: {bool(ELEVENLABS_API_KEY)}")
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_SIMPLELEARNING", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_SIMPLELEARNINGUZ", "")
 
 LANGUAGE, CONTENT, PROCESSING, STYLE = range(4)
 
@@ -137,16 +137,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     await update.message.reply_chat_action("typing")
 
-    # Check if user exists in simplelearn_users, create if not
     user_exists = await check_user_exists(user.id)
     if not user_exists:
-        await create_new_user(
-            user_id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            language="en"
+        # Ask for language selection first, do NOT create user yet
+        keyboard = [
+            [InlineKeyboardButton(text, callback_data=f"lang_{code}")]
+            for code, text in LANGUAGES.items()
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            get_translation("en", "choose_language"),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
         )
+        return LANGUAGE
 
     await update_user_activity(user)
 
@@ -198,32 +202,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    
+
     user = query.from_user
     language_code = query.data.split('_')[1]
-    
+
     logger.info(f"User {user.id} selected language: {language_code}")
-    
-    await update_user_language(user.id, language_code)
-    
+
+    # If user does not exist, create them now with selected language
+    user_exists = await check_user_exists(user.id)
+    if not user_exists:
+        await create_new_user(
+            user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language=language_code
+        )
+    else:
+        await update_user_language(user.id, language_code)
+
     await query.edit_message_text(
         text=get_translation(language_code, "language_selected"),
         parse_mode=ParseMode.MARKDOWN
     )
-    
+
     # Send welcome message and prompt for content
     await query.message.reply_text(
         text=get_translation(language_code, "welcome"),
         parse_mode=ParseMode.MARKDOWN
     )
-    
-    # Send document prompt
-    await query.message.reply_text(
-        text=get_translation(language_code, "send_document"),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
+
     return CONTENT
+
+
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user

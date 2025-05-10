@@ -9,7 +9,7 @@ LANGUAGES = {
 TRANSLATIONS = {
     "en": {
         "welcome": "🌟 Welcome to SimpleLearn! Your AI Study Assistant 🌟\n\n✨ I'm here to help you learn smarter, not harder! ✨\n\n📚 What I can do for you:\n• 📄 Transform long lectures into concise summaries\n• 📝 Convert textbooks into key points\n• 📃 Break down complex articles into digestible chunks\n• 🎥 Extract key points from video lectures\n• 🎤 Transcribe and summarize audio recordings\n• 🔗 Summarize web articles and research papers\n• 💬 Condense long text passages\n\n🎯 Perfect for:\n• Students preparing for exams\n• Researchers reviewing literature\n• Anyone learning from long-form content\n\n🚀 Ready to start? Just share your content:\n• 📄 A document (lecture, textbook, paper)\n• 🎥 A video (lecture, tutorial)\n• 🎤 An audio recording\n• 🔗 A web link (article, research paper)\n• 💬 Some text\n\nI'll create a perfect summary for you!",
-        "choose_language": "🌐 Please select your preferred language:",
+        "choose_language": "🌍 *Let's Get Started!*\n\n*Please select your preferred language:*\n\n🇬🇧 *English - Choose your language*\n🇷🇺 *Русский - Выберите ваш язык*\n🇺🇿 *O'zbek - Tilingizni tanlang*",
         "language_selected": "✅ Language selected successfully!",
         "processing": "🔄 Processing your document...",
         "processing_video": "🎥 Processing your video...",
