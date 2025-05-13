@@ -18,11 +18,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get bot token from environment variable
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_SIMPLELEARNING")
 
 # PROVIDER TOKEN CONFIGURATION
-PROVIDER_TOKEN = "1650291590:TEST:1746464438703_duV9PQLd38pFQi7E"
+PROVIDER_TOKEN = "1492744917:LIVE:C8Rss64WwBhp2PhV545SCaMfduuxNubi"
+
+# PROVIDER_TOKEN = os.environ.get("GLOBALPAY_PROVIDER_TOKEN_LIVE", "")
 
 # File size limits
 BASE_FILE_SIZE = {
